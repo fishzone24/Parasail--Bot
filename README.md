@@ -22,14 +22,14 @@
 在Ubuntu/Debian系统上使用root权限执行以下命令：
 
 ```bash
-wget -O parasail-bot.sh https://raw.githubusercontent.com/fishzone24/Parasail--Bot/main/parasail-bot.sh && chmod +x parasail-bot.sh && ./parasail-bot.sh
+wget -O parasail-bot.sh https://raw.githubusercontent.com/fishzone24/Parasail-Bot/main/parasail-bot.sh && chmod +x parasail-bot.sh && ./parasail-bot.sh
 ```
 
 ### 方法二：手动下载并安装
 
 1. 下载安装脚本：
 ```bash
-wget -O parasail-bot.sh https://raw.githubusercontent.com/fishzone24/Parasail--Bot/main/parasail-bot.sh
+wget -O parasail-bot.sh https://raw.githubusercontent.com/fishzone24/Parasail-Bot/main/parasail-bot.sh
 ```
 
 2. 添加执行权限：
@@ -59,30 +59,28 @@ chmod +x parasail-bot.sh
 
 安装完成后，会生成两个主要配置文件，位于`Parasail-Bot`目录中：
 
-1. **config.json** - 包含以太坊钱包私钥信息，你只需要输入原始私钥（每行一个），脚本会自动处理成以下格式：
-```json
-{
-  "accounts": [
-    { "privateKey": "0xYourFirstPrivateKey" },
-    { "privateKey": "0xYourSecondPrivateKey" }
-  ]
-}
+1. **config.json** - 包含以太坊钱包私钥信息，每行一个私钥，格式如下：
+```
+0xYourFirstPrivateKey
+0xYourSecondPrivateKey
+0xYourThirdPrivateKey
 ```
 
-用户输入格式示例（不需要0x前缀，不需要引号，不需要逗号）：
+用户输入格式示例（不需要0x前缀，不需要引号）：
 ```
 xxxxxxxxxxxxxxxxxxxxxxx
 yyyyyyyyyyyyyyyyyyyyyyy
 zzzzzzzzzzzzzzzzzzzzzzz
 ```
 
-2. **proxy_config.json** - 包含代理配置信息，每行一个代理地址，无需引号，无需逗号，例如：
+2. **proxy_config.json** - 包含代理配置信息，每行一个代理地址，对应config.json中的私钥顺序，例如：
 ```
 http://user:pass@192.168.1.1:8080
 socks5://user:pass@192.168.1.2:1080
+
 ```
 
-不使用代理的账户对应的行留空。
+不使用代理的账户对应的行留空（空行）。
 
 ### 配置代理
 

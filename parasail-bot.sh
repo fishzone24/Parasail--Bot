@@ -110,39 +110,85 @@ configure_proxy() {
     # 备份原始index.js
     if [ ! -f "index.js.original" ]; then
         cp index.js index.js.original
+    else
+        # 如果存在备份，恢复原始文件再修改
+        cp index.js.original index.js
     fi
     
     # 创建代理配置文件 (新格式，不包含accounts数组)
     cat > proxy_config.json << EOL
 EOL
     
-    # 修改index.js文件，添加代理支持
-    sed -i 's/const axios = require('"'"'axios'"'"');/const axios = require('"'"'axios'"'"');\nconst { HttpsProxyAgent } = require('"'"'https-proxy-agent'"'"');\nconst { SocksProxyAgent } = require('"'"'socks-proxy-agent'"'"');/' index.js
+    # 安装代理所需的依赖
+    print_info "安装代理所需依赖..."
+    npm install https-proxy-agent socks-proxy-agent --save
     
-    # 在ParasailNodeBot构造函数中添加代理支持
+    # 使用更可靠的方式修改index.js
+    print_info "修改代码添加代理支持..."
+    
+    # 1. 添加代理相关的导入
+    sed -i '1s/^/\/* Parasail Bot with Proxy Support *\/\n/' index.js
+    sed -i '/const axios = require/a const { HttpsProxyAgent } = require('"'"'https-proxy-agent'"'"');\nconst { SocksProxyAgent } = require('"'"'socks-proxy-agent'"'"');' index.js
+    
+    # 2. 修改构造函数添加代理支持
     sed -i 's/constructor(account, index, screen) {/constructor(account, index, screen, proxy = null) {\n    this.proxy = proxy;/' index.js
     
-    # 修改axios请求以使用代理（支持HTTP/HTTPS和SOCKS5）
-    sed -i 's/const response = await axios.post(`${this.baseUrl}\/user\/verify`, signatureData, {/const axiosConfig = {\n      headers: {\n        '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"',\n        '"'"'Content-Type'"'"': '"'"'application\/json'"'"'\n      }\n    };\n\n    if (this.proxy) {\n      let proxyAgent;\n      if (this.proxy.startsWith('"'"'socks5:'"'"')) {\n        proxyAgent = new SocksProxyAgent(this.proxy);\n        this.log(`Using SOCKS5 proxy: ${this.proxy}`);\n      } else {\n        proxyAgent = new HttpsProxyAgent(this.proxy);\n        this.log(`Using HTTP/HTTPS proxy: ${this.proxy}`);\n      }\n      axiosConfig.httpsAgent = proxyAgent;\n      axiosConfig.httpAgent = proxyAgent;\n    }\n\n    const response = await axios.post(`${this.baseUrl}\/user\/verify`, signatureData, axiosConfig/' index.js
+    # 3. 创建自定义函数来处理代理配置
+    cat >> index.js << 'EOL'
+
+// 添加获取代理配置的辅助函数
+function getProxyConfig(proxy, headers = {}) {
+  const config = { headers };
+  
+  if (proxy) {
+    let proxyAgent;
+    if (proxy.startsWith('socks5:')) {
+      proxyAgent = new SocksProxyAgent(proxy);
+    } else {
+      proxyAgent = new HttpsProxyAgent(proxy);
+    }
+    config.httpsAgent = proxyAgent;
+    config.httpAgent = proxyAgent;
+  }
+  
+  return config;
+}
+EOL
+
+    # 4. 修改axios请求使用代理 - 通用方法
+    # 修改所有的axios方法调用来使用代理配置
     
-    # 修改所有其他axios请求以支持代理
-    sed -i 's/const response = await axios.get(`${this.baseUrl}\/v1\/node\/node_stats`, {/const axiosConfig = {\n      params: { address: this.config.wallet_address },\n      headers: {\n        '"'"'Authorization'"'"': `Bearer ${this.config.bearer_token}`,\n        '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"'\n      }\n    };\n\n    if (this.proxy) {\n      let proxyAgent;\n      if (this.proxy.startsWith('"'"'socks5:'"'"')) {\n        proxyAgent = new SocksProxyAgent(this.proxy);\n      } else {\n        proxyAgent = new HttpsProxyAgent(this.proxy);\n      }\n      axiosConfig.httpsAgent = proxyAgent;\n      axiosConfig.httpAgent = proxyAgent;\n    }\n\n    const response = await axios.get(`${this.baseUrl}\/v1\/node\/node_stats`, axiosConfig/' index.js
+    # verifyUser方法
+    sed -i '/const signatureData = await this.generateSignature();/a \ \ \ \ const proxyConfig = this.proxy ? getProxyConfig(this.proxy, {\n      '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"',\n      '"'"'Content-Type'"'"': '"'"'application\/json'"'"'\n    }) : {\n      headers: {\n        '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"',\n        '"'"'Content-Type'"'"': '"'"'application\/json'"'"'\n      }\n    };\n\n    if (this.proxy) {\n      this.log(`Using proxy: ${this.proxy}`);\n    }' index.js
+    sed -i 's/const response = await axios.post(`${this.baseUrl}\/user\/verify`, signatureData, {/const response = await axios.post(`${this.baseUrl}\/user\/verify`, signatureData, proxyConfig);/g' index.js
+    # 删除原来的headers部分
+    sed -i '/headers: {/,/},/d' index.js
     
-    # 修改checkIn和onboardNode方法以支持代理
-    sed -i 's/const checkInResponse = await axios.post(/const checkInConfig = {\n      headers: {\n        '"'"'Authorization'"'"': `Bearer ${this.config.bearer_token}`,\n        '"'"'Content-Type'"'"': '"'"'application\/json'"'"',\n        '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"'\n      }\n    };\n\n    if (this.proxy) {\n      let proxyAgent;\n      if (this.proxy.startsWith('"'"'socks5:'"'"')) {\n        proxyAgent = new SocksProxyAgent(this.proxy);\n      } else {\n        proxyAgent = new HttpsProxyAgent(this.proxy);\n      }\n      checkInConfig.httpsAgent = proxyAgent;\n      checkInConfig.httpAgent = proxyAgent;\n    }\n\n    const checkInResponse = await axios.post(/' index.js
+    # getNodeStats方法
+    sed -i '/const response = await axios.get(`${this.baseUrl}\/v1\/node\/node_stats`, {/i \ \ \ \ const proxyConfig = this.proxy ? getProxyConfig(this.proxy, {\n      '"'"'Authorization'"'"': `Bearer ${this.config.bearer_token}`,\n      '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"'\n    }) : {\n      headers: {\n        '"'"'Authorization'"'"': `Bearer ${this.config.bearer_token}`,\n        '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"'\n      }\n    };\n\n    proxyConfig.params = { address: this.config.wallet_address };' index.js
+    sed -i 's/const response = await axios.get(`${this.baseUrl}\/v1\/node\/node_stats`, {/const response = await axios.get(`${this.baseUrl}\/v1\/node\/node_stats`, proxyConfig);/g' index.js
+    # 删除原来的headers和params部分
+    sed -i '/params: { address: this.config.wallet_address },/,/},/d' index.js
     
-    sed -i 's/`${this.baseUrl}\/v1\/node\/check_in`, \n        { address: this.config.wallet_address },\n        {/`${this.baseUrl}\/v1\/node\/check_in`, \n        { address: this.config.wallet_address },\n        checkInConfig/' index.js
+    # checkIn方法
+    sed -i '/const checkInResponse = await axios.post(/i \ \ \ \ const proxyConfig = this.proxy ? getProxyConfig(this.proxy, {\n      '"'"'Authorization'"'"': `Bearer ${this.config.bearer_token}`,\n      '"'"'Content-Type'"'"': '"'"'application\/json'"'"',\n      '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"'\n    }) : {\n      headers: {\n        '"'"'Authorization'"'"': `Bearer ${this.config.bearer_token}`,\n        '"'"'Content-Type'"'"': '"'"'application\/json'"'"',\n        '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"'\n      }\n    };' index.js
+    sed -i 's/const checkInResponse = await axios.post(/const checkInResponse = await axios.post(/g' index.js
+    sed -i 's/`${this.baseUrl}\/v1\/node\/check_in`, \n        { address: this.config.wallet_address },\n        {/`${this.baseUrl}\/v1\/node\/check_in`, { address: this.config.wallet_address }, proxyConfig);/g' index.js
+    # 删除原来的headers部分
+    sed -i '/headers: {/,/},/d' index.js
     
-    sed -i 's/const response = await axios.post(`${this.baseUrl}\/v1\/node\/onboard`, /const onboardConfig = {\n      headers: {\n        '"'"'Authorization'"'"': `Bearer ${this.config.bearer_token}`,\n        '"'"'Content-Type'"'"': '"'"'application\/json'"'"',\n        '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"'\n      }\n    };\n\n    if (this.proxy) {\n      let proxyAgent;\n      if (this.proxy.startsWith('"'"'socks5:'"'"')) {\n        proxyAgent = new SocksProxyAgent(this.proxy);\n      } else {\n        proxyAgent = new HttpsProxyAgent(this.proxy);\n      }\n      onboardConfig.httpsAgent = proxyAgent;\n      onboardConfig.httpAgent = proxyAgent;\n    }\n\n    const response = await axios.post(`${this.baseUrl}\/v1\/node\/onboard`, /' index.js
+    # onboardNode方法
+    sed -i '/const response = await axios.post(`${this.baseUrl}\/v1\/node\/onboard`/i \ \ \ \ const proxyConfig = this.proxy ? getProxyConfig(this.proxy, {\n      '"'"'Authorization'"'"': `Bearer ${this.config.bearer_token}`,\n      '"'"'Content-Type'"'"': '"'"'application\/json'"'"',\n      '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"'\n    }) : {\n      headers: {\n        '"'"'Authorization'"'"': `Bearer ${this.config.bearer_token}`,\n        '"'"'Content-Type'"'"': '"'"'application\/json'"'"',\n        '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"'\n      }\n    };' index.js
+    sed -i 's/const response = await axios.post(`${this.baseUrl}\/v1\/node\/onboard`, /const response = await axios.post(`${this.baseUrl}\/v1\/node\/onboard`, /g' index.js
+    sed -i 's/{ address: this.config.wallet_address },\n        {/{ address: this.config.wallet_address }, proxyConfig);/g' index.js
+    # 删除原来的headers部分
+    sed -i '/headers: {/,/},/d' index.js
     
-    sed -i 's/{ address: this.config.wallet_address },\n        {/{ address: this.config.wallet_address },\n        onboardConfig/' index.js
+    # 5. 修改main函数以支持简单格式的config.json和proxy_config.json
+    # 找到main函数
+    sed -i '/async function main() {/,/main().catch/c\async function main() {\n  // 加载私钥配置（每行一个私钥）\n  let privateKeys = [];\n  try {\n    const configPath = path.resolve('"'"'./config.json'"'"');\n    if (fs.existsSync(configPath)) {\n      const configContent = fs.readFileSync(configPath, '"'"'utf8'"'"');\n      privateKeys = configContent.split('"'"'\\n'"'"').filter(line => line.trim() !== '"'"''"'"');\n      console.log(`Loaded ${privateKeys.length} accounts.`);\n    } else {\n      console.error('"'"'config.json file not found'"'"');\n      process.exit(1);\n    }\n  } catch (error) {\n    console.error('"'"'Error loading accounts config:'"'"', error);\n    process.exit(1);\n  }\n\n  if (privateKeys.length === 0) {\n    console.error('"'"'No accounts found in config.json'"'"');\n    process.exit(1);\n  }\n\n  // 转换为accounts格式\n  const accounts = privateKeys.map(privateKey => ({ privateKey }));\n\n  // 加载代理配置（每行一个代理）\n  let proxies = [];\n  try {\n    const proxyConfigPath = path.resolve('"'"'./proxy_config.json'"'"');\n    if (fs.existsSync(proxyConfigPath)) {\n      const proxyContent = fs.readFileSync(proxyConfigPath, '"'"'utf8'"'"');\n      proxies = proxyContent.split('"'"'\\n'"'"').filter((line, i) => i < privateKeys.length);\n      // 填充空代理以匹配账户数量\n      while (proxies.length < privateKeys.length) {\n        proxies.push('"'"''"'"');\n      }\n      console.log(`Loaded ${proxies.filter(p => p.trim() !== '"'"''"'"').length} proxies.`);\n    }\n  } catch (error) {\n    console.error('"'"'Error loading proxy config:'"'"', error);\n  }\n\n  // 创建一个共享的 blessed 屏幕\n  const screen = blessed.screen({\n    smartCSR: true,\n    title: '"'"'Multi-Account Parasail Bot'"'"'\n  });\n\n  // 记录账户数量，以便动态分配 UI 空间\n  screen.accountsCount = accounts.length;\n\n  // 为每个账户创建 ParasailNodeBot 实例\n  const bots = accounts.map((account, index) => {\n    const proxy = index < proxies.length ? proxies[index].trim() : null;\n    return new ParasailNodeBot(account, index, screen, proxy ? proxy : null);\n  });\n\n  // 添加退出键\n  screen.key(['"'"'q'"'"', '"'"'C-c'"'"'], () => {\n    return process.exit(0);\n  });\n\n  // 底部添加退出提示\n  const quitBox = blessed.box({\n    parent: screen,\n    bottom: 0,\n    left: 0,\n    width: '"'"'100%'"'"',\n    height: 1,\n    content: '"'"'Press Q to Quit'"'"',\n    style: {\n      fg: '"'"'white'"'"',\n      bg: '"'"'gray'"'"'\n    }\n  });\n\n  // 并发启动所有账户\n  await Promise.all(bots.map(bot => bot.start()));\n}\n\nmain().catch(error => {\n  console.error('"'"'Main error:'"'"', error);\n  process.exit(1);\n});' index.js
     
-    # 修改main函数以支持代理
-    sed -i 's/  const bots = accounts.map((account, index) => new ParasailNodeBot(account, index, screen));/  let proxies = [];\n  try {\n    const proxyConfigPath = path.resolve('"'"'.\/proxy_config.json'"'"');\n    if (fs.existsSync(proxyConfigPath)) {\n      const proxyContent = fs.readFileSync(proxyConfigPath, '"'"'utf8'"'"');\n      proxies = proxyContent.split('"'"'\\n'"'"').filter(line => line.trim() !== '"'"''"'"');\n    }\n  } catch (error) {\n    console.error('"'"'Error loading proxy config:'"'"', error);\n  }\n\n  const bots = accounts.map((account, index) => {\n    const proxy = index < proxies.length ? proxies[index] : null;\n    return new ParasailNodeBot(account, index, screen, proxy);\n  });/' index.js
-    
-    # 安装代理所需的依赖
-    npm install https-proxy-agent socks-proxy-agent
-    
+    print_info "代码修改完成，确保配置更可靠"
     cd ..
     
     print_info "代理功能配置完成"
@@ -164,7 +210,8 @@ add_accounts_and_proxies() {
     echo "-----------------------------------"
     
     # 确保config.json文件不存在或是空文件，准备写入
-    echo "" > config.json
+    > config.json
+    > proxy_config.json
     i=0
     
     while true; do
@@ -204,24 +251,13 @@ add_accounts_and_proxies() {
         return 1
     fi
     
-    # 创建新的config.json文件（符合程序要求的格式）
-    echo '{' > config.json
-    echo '  "accounts": [' >> config.json
-    
+    # 创建新的config.json文件（每行一个私钥的简单格式）
     for i in "${!PRIVATE_KEY_ARRAY[@]}"; do
         PRIVATE_KEY=${PRIVATE_KEY_ARRAY[$i]}
-        echo "    { \"privateKey\": \"$PRIVATE_KEY\" }" >> config.json
-        if [ $i -lt $((${#PRIVATE_KEY_ARRAY[@]} - 1)) ]; then
-            echo "    ," >> config.json
-        fi
+        echo "$PRIVATE_KEY" >> config.json
     done
     
-    echo '  ]' >> config.json
-    echo '}' >> config.json
-    
-    # 更新proxy_config.json（新格式：每行一个代理，没有引号和逗号）
-    > proxy_config.json
-    
+    # 更新proxy_config.json（每行一个代理）
     for i in "${!PROXY_ARRAY[@]}"; do
         PROXY=${PROXY_ARRAY[$i]}
         if [ "$PROXY" != "none" ]; then
@@ -281,17 +317,225 @@ start_bot() {
         return 1
     fi
     
-    systemctl start parasail-bot
-    sleep 2
+    # 检查依赖是否已安装
+    cd Parasail-Bot
+    print_info "检查依赖状态..."
     
+    if [ ! -d "node_modules/https-proxy-agent" ] || [ ! -d "node_modules/socks-proxy-agent" ]; then
+        print_warn "检测到代理依赖未完全安装，正在安装..."
+        npm install https-proxy-agent socks-proxy-agent --save
+    fi
+    
+    # 验证配置文件
+    if [ ! -f "config.json" ]; then
+        print_error "config.json 不存在，请先配置账户"
+        cd ..
+        return 1
+    fi
+    
+    # 确保配置文件有内容
+    if [ ! -s "config.json" ]; then
+        print_error "config.json 是空文件，请先配置账户"
+        cd ..
+        return 1
+    fi
+    
+    cd ..
+    
+    # 启动服务
+    systemctl daemon-reload
+    systemctl start parasail-bot
+    sleep 3
+    
+    # 检查启动状态
     if systemctl is-active --quiet parasail-bot; then
         print_info "机器人已成功启动"
         print_info "查看日志请使用: journalctl -u parasail-bot -f"
     else
-        print_error "机器人启动失败，请检查日志"
-        print_info "查看日志请使用: journalctl -u parasail-bot -f"
+        print_error "机器人启动失败，正在尝试排查问题..."
+        
+        # 尝试读取错误日志
+        ERROR_LOG=$(journalctl -u parasail-bot -n 20 --no-pager)
+        echo "错误日志片段："
+        echo "$ERROR_LOG"
+        
+        # 可能的错误原因和解决方案
+        print_warn "可能的问题原因:"
+        print_warn "1. 代理配置格式不正确"
+        print_warn "2. 文件权限问题"
+        print_warn "3. Node.js 版本不兼容"
+        print_warn "4. 程序代码修改错误"
+        
+        print_info "尝试解决方法:"
+        print_info "- 选择菜单选项8'修复常见问题'进行自动修复"
+        print_info "- 检查 Parasail-Bot/config.json 和 proxy_config.json 格式是否正确"
+        print_info "- 运行: cd Parasail-Bot && npm install && npm install https-proxy-agent socks-proxy-agent --save"
+        print_info "- 如果使用旧版本Node.js，尝试更新: curl -fsSL https://deb.nodesource.com/setup_16.x | bash - && apt install -y nodejs"
+        
         return 1
     fi
+}
+
+# 修复常见问题
+fix_issues() {
+    print_info "开始修复常见问题..."
+    
+    if [ ! -d "Parasail-Bot" ]; then
+        print_error "未检测到Parasail-Bot目录，请先安装"
+        return 1
+    fi
+    
+    cd Parasail-Bot
+    
+    # 1. 检查Node.js版本
+    print_info "检查Node.js版本..."
+    NODE_VERSION=$(node -v | cut -d 'v' -f 2 | cut -d '.' -f 1)
+    if [ "$NODE_VERSION" -lt 14 ]; then
+        print_warn "Node.js版本低于14，正在更新..."
+        curl -fsSL https://deb.nodesource.com/setup_16.x | bash -
+        apt install -y nodejs
+        print_info "Node.js已更新，当前版本："
+        node -v
+    else
+        print_info "Node.js版本正常: $(node -v)"
+    fi
+    
+    # 2. 恢复和修复配置文件
+    print_info "检查配置文件..."
+    
+    # 检查index.js是否存在
+    if [ ! -f "index.js" ]; then
+        print_error "index.js不存在，尝试从备份恢复"
+        if [ -f "index.js.original" ]; then
+            cp index.js.original index.js
+            print_info "已从备份恢复index.js"
+        else
+            print_error "无法找到index.js备份文件，请重新安装"
+            cd ..
+            return 1
+        fi
+    fi
+    
+    # 3. 重新安装依赖
+    print_info "正在重新安装依赖..."
+    rm -rf node_modules package-lock.json
+    npm install
+    npm install https-proxy-agent socks-proxy-agent --save
+    
+    # 4. 重新配置代理支持
+    print_info "重新配置代理支持..."
+    
+    # 如果有备份则恢复
+    if [ -f "index.js.original" ]; then
+        cp index.js.original index.js
+        print_info "已恢复原始index.js"
+    fi
+    
+    # 重新配置
+    print_info "正在重新应用代理配置..."
+    cd ..
+    configure_proxy
+    
+    # 5. 验证配置文件格式
+    cd Parasail-Bot
+    if [ -f "config.json" ]; then
+        if [ ! -s "config.json" ]; then
+            print_warn "config.json为空，请重新设置账户"
+            cd ..
+            add_accounts_and_proxies
+        else
+            print_info "config.json格式正确"
+            
+            # 检查文件内容，每行应该是一个私钥
+            local key_count=$(wc -l < config.json)
+            print_info "检测到 $key_count 个私钥"
+        fi
+    else
+        print_warn "找不到config.json，请设置账户"
+        cd ..
+        add_accounts_and_proxies
+    fi
+    
+    # 6. 检查代理配置
+    if [ -f "proxy_config.json" ]; then
+        local proxy_count=$(grep -v "^$" proxy_config.json | wc -l)
+        print_info "检测到 $proxy_count 个代理配置"
+    else
+        print_warn "未找到proxy_config.json，创建空文件"
+        touch proxy_config.json
+    fi
+    
+    # 7. 修复文件权限
+    print_info "修复文件权限..."
+    chmod -R 755 .
+    
+    cd ..
+    
+    # 8. 重启服务
+    print_info "正在重新加载系统服务..."
+    systemctl daemon-reload
+    
+    if systemctl is-active --quiet parasail-bot; then
+        print_info "重启parasail-bot服务..."
+        systemctl restart parasail-bot
+    else
+        print_info "启动parasail-bot服务..."
+        systemctl start parasail-bot
+    fi
+    
+    sleep 3
+    
+    if systemctl is-active --quiet parasail-bot; then
+        print_info "服务已成功启动!"
+    else
+        print_error "服务启动失败，查看错误日志:"
+        journalctl -u parasail-bot -n 10 --no-pager
+        
+        print_info "尝试进一步修复..."
+        print_info "1. 完全重置代码和配置..."
+        
+        # 备份当前配置
+        if [ -f "Parasail-Bot/config.json" ]; then
+            cp Parasail-Bot/config.json Parasail-Bot/config.json.bak
+        fi
+        
+        if [ -f "Parasail-Bot/proxy_config.json" ]; then
+            cp Parasail-Bot/proxy_config.json Parasail-Bot/proxy_config.json.bak
+        fi
+        
+        # 删除目录并重新安装
+        cd Parasail-Bot
+        rm -rf node_modules package-lock.json
+        cd ..
+        clone_repository
+        configure_proxy
+        
+        # 恢复配置
+        if [ -f "Parasail-Bot/config.json.bak" ]; then
+            cp Parasail-Bot/config.json.bak Parasail-Bot/config.json
+            print_info "已恢复账户配置"
+        fi
+        
+        if [ -f "Parasail-Bot/proxy_config.json.bak" ]; then
+            cp Parasail-Bot/proxy_config.json.bak Parasail-Bot/proxy_config.json
+            print_info "已恢复代理配置"
+        fi
+        
+        print_info "重启服务..."
+        systemctl daemon-reload
+        systemctl restart parasail-bot
+        
+        sleep 3
+        
+        if systemctl is-active --quiet parasail-bot; then
+            print_info "服务已成功启动!"
+        else
+            print_error "服务启动仍然失败，请尝试重新安装或手动检查配置"
+            journalctl -u parasail-bot -n 10 --no-pager
+        fi
+    fi
+    
+    print_info "修复流程完成"
 }
 
 # 停止机器人
@@ -352,9 +596,11 @@ uninstall_bot() {
 # 主函数
 main() {
     clear
-    echo "============================================"
-    echo "    Parasail多账号代理机器人管理脚本    "
-    echo "============================================"
+    echo -e "${BLUE}==================================================================${RESET}"
+    echo -e "${GREEN}Parasail-Bot一键管理脚本${RESET}"
+    echo -e "${YELLOW}脚本作者: fishzone24 - 推特: https://x.com/fishzone24${RESET}"
+    echo -e "${YELLOW}此脚本为免费开源脚本，如有问题请提交 issue${RESET}"
+    echo -e "${BLUE}==================================================================${RESET}"
     echo
     
     echo "请选择操作:"
@@ -365,9 +611,10 @@ main() {
     echo "5. 查看机器人状态"
     echo "6. 查看机器人日志"
     echo "7. 卸载机器人"
+    echo "8. 修复常见问题"
     echo "0. 退出"
     
-    read -p "请输入选项 [0-7]: " option
+    read -p "请输入选项 [0-8]: " option
     
     case $option in
         1)
@@ -420,6 +667,10 @@ main() {
         7)
             check_root
             uninstall_bot
+            ;;
+        8)
+            check_root
+            fix_issues
             ;;
         0)
             exit 0
