@@ -403,6 +403,12 @@ fix_issues() {
     # 2. 恢复和修复配置文件
     print_info "检查配置文件..."
     
+    # 备份当前index.js（如果没有备份）
+    if [ -f "index.js" ] && [ ! -f "index.js.backup_syntax" ]; then
+        cp index.js index.js.backup_syntax
+        print_info "已创建index.js语法备份"
+    fi
+    
     # 检查index.js是否存在
     if [ ! -f "index.js" ]; then
         print_error "index.js不存在，尝试从备份恢复"
@@ -414,6 +420,48 @@ fix_issues() {
             cd ..
             return 1
         fi
+    fi
+    
+    # 检查index.js语法错误
+    print_info "检查index.js是否有语法错误..."
+    if ! node --check index.js &>/dev/null; then
+        print_warn "检测到index.js语法错误，尝试修复..."
+        
+        # 从备份恢复
+        if [ -f "index.js.original" ]; then
+            cp index.js.original index.js
+            print_info "已从原始备份恢复index.js"
+        elif [ -f "index.js.backup_syntax" ]; then
+            cp index.js.backup_syntax index.js
+            print_info "已从语法备份恢复index.js"
+        else
+            print_warn "无法找到index.js备份，将尝试修复语法错误"
+            
+            # 修复常见语法错误 - 括号不匹配问题
+            sed -i 's/););/);/g' index.js
+            sed -i 's/});});/});/g' index.js
+            sed -i 's/}\s*});/});/g' index.js
+            sed -i 's/}\s*)\s*});/});/g' index.js
+            
+            # 检查修复是否成功
+            if ! node --check index.js &>/dev/null; then
+                print_error "语法修复失败，将重置index.js"
+                # 通过git clone临时获取原始文件
+                if [ ! -d "temp_repo" ]; then
+                    git clone https://github.com/parasail-protocol/parasail-bot.git temp_repo
+                fi
+                
+                if [ -d "temp_repo" ]; then
+                    cp temp_repo/index.js index.js
+                    print_info "已从仓库恢复原始index.js"
+                    rm -rf temp_repo
+                fi
+            else
+                print_info "语法修复成功"
+            fi
+        fi
+    else
+        print_info "index.js语法检查通过"
     fi
     
     # 3. 重新安装依赖
@@ -436,8 +484,38 @@ fix_issues() {
     cd ..
     configure_proxy
     
-    # 5. 验证配置文件格式
+    # 5. 验证代理配置文件格式
     cd Parasail-Bot
+    # 强制检查并修复proxy_config.json
+    if [ -f "proxy_config.json" ]; then
+        # 确保proxy_config.json格式正确，一行一个代理
+        if [ -s "proxy_config.json" ]; then
+            # 检查并清理格式
+            # 1. 删除可能的空白行和注释
+            sed -i '/^$/d' proxy_config.json
+            sed -i '/^#/d' proxy_config.json
+            # 2. 删除可能的JSON格式符号
+            sed -i 's/\[//g' proxy_config.json
+            sed -i 's/\]//g' proxy_config.json
+            sed -i 's/,//g' proxy_config.json
+            sed -i 's/"//g' proxy_config.json
+            sed -i 's/{//g' proxy_config.json
+            sed -i 's/}//g' proxy_config.json
+            # 3. 确保每行格式正确
+            sed -i 's/^[[:space:]]*//g' proxy_config.json
+            sed -i 's/[[:space:]]*$//g' proxy_config.json
+            
+            local proxy_count=$(grep -v "^$" proxy_config.json | wc -l)
+            print_info "修复后检测到 $proxy_count 个代理配置"
+        else
+            print_warn "proxy_config.json为空"
+        fi
+    else
+        print_warn "未找到proxy_config.json，创建空文件"
+        touch proxy_config.json
+    fi
+    
+    # 6. 验证config.json格式
     if [ -f "config.json" ]; then
         if [ ! -s "config.json" ]; then
             print_warn "config.json为空，请重新设置账户"
@@ -446,8 +524,25 @@ fix_issues() {
         else
             print_info "config.json格式正确"
             
+            # 清理config.json，确保每行一个私钥
+            # 1. 删除可能的空白行和注释
+            sed -i '/^$/d' config.json
+            sed -i '/^#/d' config.json
+            # 2. 删除可能的JSON格式符号
+            sed -i 's/\[//g' config.json
+            sed -i 's/\]//g' config.json
+            sed -i 's/,//g' config.json
+            sed -i 's/"//g' config.json
+            sed -i 's/{//g' config.json
+            sed -i 's/}//g' config.json
+            # 3. 确保每行格式正确
+            sed -i 's/^[[:space:]]*//g' config.json
+            sed -i 's/[[:space:]]*$//g' config.json
+            # 4. 确保私钥前缀为0x
+            sed -i 's/^[^0]/0x&/g' config.json
+            
             # 检查文件内容，每行应该是一个私钥
-            local key_count=$(wc -l < config.json)
+            local key_count=$(grep -v "^$" config.json | wc -l)
             print_info "检测到 $key_count 个私钥"
         fi
     else
@@ -456,18 +551,10 @@ fix_issues() {
         add_accounts_and_proxies
     fi
     
-    # 6. 检查代理配置
-    if [ -f "proxy_config.json" ]; then
-        local proxy_count=$(grep -v "^$" proxy_config.json | wc -l)
-        print_info "检测到 $proxy_count 个代理配置"
-    else
-        print_warn "未找到proxy_config.json，创建空文件"
-        touch proxy_config.json
-    fi
-    
     # 7. 修复文件权限
     print_info "修复文件权限..."
     chmod -R 755 .
+    chmod 644 *.json
     
     cd ..
     
@@ -519,6 +606,17 @@ fix_issues() {
         if [ -f "Parasail-Bot/proxy_config.json.bak" ]; then
             cp Parasail-Bot/proxy_config.json.bak Parasail-Bot/proxy_config.json
             print_info "已恢复代理配置"
+            
+            # 确保proxy_config.json格式正确
+            cd Parasail-Bot
+            # 删除可能的JSON格式符号
+            sed -i 's/\[//g' proxy_config.json
+            sed -i 's/\]//g' proxy_config.json
+            sed -i 's/,//g' proxy_config.json
+            sed -i 's/"//g' proxy_config.json
+            sed -i 's/{//g' proxy_config.json
+            sed -i 's/}//g' proxy_config.json
+            cd ..
         fi
         
         print_info "重启服务..."
