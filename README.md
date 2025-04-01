@@ -22,14 +22,14 @@
 在Ubuntu/Debian系统上使用root权限执行以下命令：
 
 ```bash
-wget -O parasail-bot.sh https://raw.githubusercontent.com/fishzone24/Parasail-Bot/main/parasail-bot.sh && chmod +x parasail-bot.sh && ./parasail-bot.sh
+wget -O parasail-bot.sh https://raw.githubusercontent.com/fishzone24/Parasail--Bot/main/parasail-bot.sh && chmod +x parasail-bot.sh && ./parasail-bot.sh
 ```
 
 ### 方法二：手动下载并安装
 
 1. 下载安装脚本：
 ```bash
-wget -O parasail-bot.sh https://raw.githubusercontent.com/fishzone24/Parasail-Bot/main/parasail-bot.sh
+wget -O parasail-bot.sh https://raw.githubusercontent.com/fishzone24/Parasail--Bot/main/parasail-bot.sh
 ```
 
 2. 添加执行权限：
