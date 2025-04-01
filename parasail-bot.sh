@@ -211,34 +211,32 @@ configure_proxy() {
     
     # 备份原始index.js
     if [ ! -f "index.js.original" ]; then
+        print_info "备份原始index.js文件..."
         cp index.js index.js.original
-    else
-        # 如果存在备份，恢复原始文件再修改
-        cp index.js.original index.js
     fi
     
     # 创建代理配置文件 (新格式，不包含accounts数组)
-    cat > proxy_config.json << EOL
-EOL
+    touch proxy_config.json
     
     # 安装代理所需的依赖
     print_info "安装代理所需依赖..."
     npm install https-proxy-agent socks-proxy-agent --save
-    
-    # 使用更可靠的方式修改index.js
-    print_info "修改代码添加代理支持..."
-    
-    # 1. 添加代理相关的导入
-    sed -i '1s/^/\/* Parasail Bot with Proxy Support *\/\n/' index.js
-    sed -i '/const axios = require/a const { HttpsProxyAgent } = require('"'"'https-proxy-agent'"'"');\nconst { SocksProxyAgent } = require('"'"'socks-proxy-agent'"'"');' index.js
-    
-    # 2. 修改构造函数添加代理支持
-    sed -i 's/constructor(account, index, screen) {/constructor(account, index, screen, proxy = null) {\n    this.proxy = proxy;/' index.js
-    
-    # 3. 创建自定义函数来处理代理配置
-    cat >> index.js << 'EOL'
 
-// 添加获取代理配置的辅助函数
+    # 使用完整预构建的index.js文件替换现有文件
+    print_info "替换index.js文件，添加代理支持..."
+    
+    # 创建支持代理的index.js文件
+    cat > index.js << 'EOL'
+/* Parasail Bot with Proxy Support */
+const axios = require('axios');
+const { ethers } = require('ethers');
+const fs = require('fs');
+const path = require('path');
+const blessed = require('blessed');
+const { HttpsProxyAgent } = require('https-proxy-agent');
+const { SocksProxyAgent } = require('socks-proxy-agent');
+
+// 获取代理配置的辅助函数
 function getProxyConfig(proxy, headers = {}) {
   const config = { headers };
   
@@ -255,42 +253,360 @@ function getProxyConfig(proxy, headers = {}) {
   
   return config;
 }
+
+class ParasailNodeBot {
+  constructor(account, index, screen, proxy = null) {
+    this.account = account;
+    this.index = index;
+    this.screen = screen;
+    this.proxy = proxy;
+    this.baseUrl = 'https://api.slicksurfer.xyz';
+    this.config = {};
+    this.nodeInfo = {};
+    
+    // UI 创建
+    const height = Math.floor((screen.height - 3) / screen.accountsCount);
+    this.log_box = blessed.log({
+      parent: screen,
+      top: index * height,
+      left: 0,
+      width: '100%',
+      height: height,
+      border: {
+        type: 'line'
+      },
+      style: {
+        fg: 'green',
+        border: {
+          fg: 'blue'
+        }
+      },
+      scrollable: true,
+      scrollbar: {
+        style: {
+          bg: 'white'
+        }
+      }
+    });
+  }
+  
+  log(message) {
+    const time = new Date().toLocaleTimeString();
+    this.log_box.log(`[${time}] [Account ${this.index + 1}] ${message}`);
+    this.screen.render();
+  }
+  
+  async generateSignature() {
+    // 创建钱包
+    const wallet = new ethers.Wallet(this.account.privateKey);
+    
+    // 获取钱包地址
+    const address = await wallet.getAddress();
+    this.config.wallet_address = address;
+    
+    // 签名消息
+    const message = 'You are starting the PARASAIL NODE for Brawler Bearz Labs.';
+    const signature = await wallet.signMessage(message);
+    
+    return {
+      message,
+      signature,
+      address
+    };
+  }
+  
+  async verifyUser() {
+    this.log('正在验证钱包...');
+    
+    try {
+      const signatureData = await this.generateSignature();
+      
+      const proxyConfig = this.proxy ? getProxyConfig(this.proxy, {
+        'Accept': 'application/json, text/plain, */*',
+        'Content-Type': 'application/json'
+      }) : {
+        headers: {
+          'Accept': 'application/json, text/plain, */*',
+          'Content-Type': 'application/json'
+        }
+      };
+      
+      if (this.proxy) {
+        this.log(`使用代理: ${this.proxy}`);
+      }
+      
+      const response = await axios.post(`${this.baseUrl}/user/verify`, signatureData, proxyConfig);
+      
+      if (response.data && response.data.bearer_token) {
+        this.config.bearer_token = response.data.bearer_token;
+        this.log('钱包验证成功');
+        return true;
+      } else {
+        this.log('钱包验证失败: 响应中没有token');
+        return false;
+      }
+    } catch (error) {
+      this.log(`钱包验证错误: ${error.message}`);
+      if (error.response) {
+        this.log(`状态码: ${error.response.status}`);
+      }
+      return false;
+    }
+  }
+  
+  async getNodeStats() {
+    this.log('查询节点状态...');
+    
+    try {
+      const proxyConfig = this.proxy ? getProxyConfig(this.proxy, {
+        'Authorization': `Bearer ${this.config.bearer_token}`,
+        'Accept': 'application/json, text/plain, */*'
+      }) : {
+        headers: {
+          'Authorization': `Bearer ${this.config.bearer_token}`,
+          'Accept': 'application/json, text/plain, */*'
+        }
+      };
+      
+      proxyConfig.params = { address: this.config.wallet_address };
+      
+      const response = await axios.get(`${this.baseUrl}/v1/node/node_stats`, proxyConfig);
+      
+      if (response.data) {
+        this.nodeInfo = response.data;
+        this.log(`节点状态: ${response.data.status || 'unknown'}`);
+        return response.data;
+      }
+      return null;
+    } catch (error) {
+      this.log(`获取节点状态错误: ${error.message}`);
+      return null;
+    }
+  }
+  
+  async checkIn() {
+    this.log('执行节点签到...');
+    
+    try {
+      const proxyConfig = this.proxy ? getProxyConfig(this.proxy, {
+        'Authorization': `Bearer ${this.config.bearer_token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/plain, */*'
+      }) : {
+        headers: {
+          'Authorization': `Bearer ${this.config.bearer_token}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json, text/plain, */*'
+        }
+      };
+      
+      const checkInResponse = await axios.post(`${this.baseUrl}/v1/node/check_in`, { address: this.config.wallet_address }, proxyConfig);
+      
+      if (checkInResponse.data) {
+        this.log(`签到成功: ${JSON.stringify(checkInResponse.data)}`);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      this.log(`签到错误: ${error.message}`);
+      return false;
+    }
+  }
+
+  async onboardNode() {
+    this.log('正在注册新节点...');
+    
+    try {
+      const proxyConfig = this.proxy ? getProxyConfig(this.proxy, {
+        'Authorization': `Bearer ${this.config.bearer_token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/plain, */*'
+      }) : {
+        headers: {
+          'Authorization': `Bearer ${this.config.bearer_token}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json, text/plain, */*'
+        }
+      };
+      
+      const response = await axios.post(`${this.baseUrl}/v1/node/onboard`, { address: this.config.wallet_address }, proxyConfig);
+      
+      if (response.data) {
+        this.log(`节点注册成功: ${JSON.stringify(response.data)}`);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      this.log(`节点注册错误: ${error.message}`);
+      if (error.response && error.response.data) {
+        this.log(`响应详情: ${JSON.stringify(error.response.data)}`);
+      }
+      return false;
+    }
+  }
+  
+  async start() {
+    this.log('初始化账户...');
+    
+    try {
+      // 验证用户
+      const userVerified = await this.verifyUser();
+      
+      if (!userVerified) {
+        this.log('用户验证失败，无法继续');
+        return;
+      }
+      
+      // 获取节点状态
+      const stats = await this.getNodeStats();
+      
+      if (stats && stats.status === 'active') {
+        this.log('节点已激活');
+        
+        // 开始定期签到
+        await this.checkIn();
+        
+        // 10分钟签到一次
+        setInterval(async () => {
+          await this.checkIn();
+        }, 10 * 60 * 1000);
+        
+      } else {
+        this.log('节点未激活，尝试注册');
+        const registered = await this.onboardNode();
+        
+        if (registered) {
+          this.log('节点已成功注册，等待激活');
+          
+          // 等待节点状态变为active
+          const checkStatus = async () => {
+            const stats = await this.getNodeStats();
+            
+            if (stats && stats.status === 'active') {
+              this.log('节点已激活，开始执行定期签到');
+              
+              // 执行首次签到
+              await this.checkIn();
+              
+              // 10分钟签到一次
+              setInterval(async () => {
+                await this.checkIn();
+              }, 10 * 60 * 1000);
+              
+              return;
+            }
+            
+            // 继续等待
+            this.log('等待节点激活...');
+            setTimeout(checkStatus, 30 * 1000);
+          };
+          
+          // 开始检查状态
+          setTimeout(checkStatus, 30 * 1000);
+        } else {
+          this.log('节点注册失败');
+        }
+      }
+    } catch (error) {
+      this.log(`启动过程中出错: ${error.message}`);
+    }
+  }
+}
+
+async function main() {
+  // 加载私钥配置（每行一个私钥）
+  let privateKeys = [];
+  try {
+    const configPath = path.resolve('./config.json');
+    if (fs.existsSync(configPath)) {
+      const configContent = fs.readFileSync(configPath, 'utf8');
+      privateKeys = configContent.split('\n').filter(line => line.trim() !== '');
+      console.log(`已加载 ${privateKeys.length} 个账户`);
+    } else {
+      console.error('config.json 文件不存在');
+      process.exit(1);
+    }
+  } catch (error) {
+    console.error('加载账户配置错误:', error);
+    process.exit(1);
+  }
+
+  if (privateKeys.length === 0) {
+    console.error('config.json 中没有找到任何账户');
+    process.exit(1);
+  }
+
+  // 转换为accounts格式
+  const accounts = privateKeys.map(privateKey => ({ privateKey }));
+
+  // 加载代理配置（每行一个代理）
+  let proxies = [];
+  try {
+    const proxyConfigPath = path.resolve('./proxy_config.json');
+    if (fs.existsSync(proxyConfigPath)) {
+      const proxyContent = fs.readFileSync(proxyConfigPath, 'utf8');
+      proxies = proxyContent.split('\n').filter(line => line.trim() !== '');
+      console.log(`已加载 ${proxies.length} 个代理`);
+    }
+  } catch (error) {
+    console.error('加载代理配置错误:', error);
+  }
+
+  // 创建一个共享的 blessed 屏幕
+  const screen = blessed.screen({
+    smartCSR: true,
+    title: 'Multi-Account Parasail Bot'
+  });
+
+  // 记录账户数量，以便动态分配 UI 空间
+  screen.accountsCount = accounts.length;
+
+  // 为每个账户创建 ParasailNodeBot 实例
+  const bots = accounts.map((account, index) => {
+    const proxy = index < proxies.length ? proxies[index] : null;
+    return new ParasailNodeBot(account, index, screen, proxy && proxy.trim() !== '' ? proxy : null);
+  });
+
+  // 添加退出键
+  screen.key(['q', 'C-c'], () => {
+    return process.exit(0);
+  });
+
+  // 底部添加退出提示
+  const quitBox = blessed.box({
+    parent: screen,
+    bottom: 0,
+    left: 0,
+    width: '100%',
+    height: 1,
+    content: '按 Q 退出',
+    style: {
+      fg: 'white',
+      bg: 'gray'
+    }
+  });
+
+  // 并发启动所有账户
+  await Promise.all(bots.map(bot => bot.start()));
+}
+
+main().catch(error => {
+  console.error('主程序错误:', error);
+  process.exit(1);
+});
 EOL
 
-    # 4. 修改axios请求使用代理 - 通用方法
-    # 修改所有的axios方法调用来使用代理配置
+    # 测试语法
+    if ! node --check index.js &>/dev/null; then
+        print_error "生成的index.js文件存在语法错误，尝试恢复原始文件"
+        if [ -f "index.js.original" ]; then
+            cp index.js.original index.js
+            print_info "已恢复原始index.js文件"
+        fi
+        return 1
+    fi
     
-    # verifyUser方法
-    sed -i '/const signatureData = await this.generateSignature();/a \ \ \ \ const proxyConfig = this.proxy ? getProxyConfig(this.proxy, {\n      '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"',\n      '"'"'Content-Type'"'"': '"'"'application\/json'"'"'\n    }) : {\n      headers: {\n        '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"',\n        '"'"'Content-Type'"'"': '"'"'application\/json'"'"'\n      }\n    };\n\n    if (this.proxy) {\n      this.log(`Using proxy: ${this.proxy}`);\n    }' index.js
-    sed -i 's/const response = await axios.post(`${this.baseUrl}\/user\/verify`, signatureData, {/const response = await axios.post(`${this.baseUrl}\/user\/verify`, signatureData, proxyConfig);/g' index.js
-    # 删除原来的headers部分
-    sed -i '/headers: {/,/},/d' index.js
-    
-    # getNodeStats方法
-    sed -i '/const response = await axios.get(`${this.baseUrl}\/v1\/node\/node_stats`, {/i \ \ \ \ const proxyConfig = this.proxy ? getProxyConfig(this.proxy, {\n      '"'"'Authorization'"'"': `Bearer ${this.config.bearer_token}`,\n      '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"'\n    }) : {\n      headers: {\n        '"'"'Authorization'"'"': `Bearer ${this.config.bearer_token}`,\n        '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"'\n      }\n    };\n\n    proxyConfig.params = { address: this.config.wallet_address };' index.js
-    sed -i 's/const response = await axios.get(`${this.baseUrl}\/v1\/node\/node_stats`, {/const response = await axios.get(`${this.baseUrl}\/v1\/node\/node_stats`, proxyConfig);/g' index.js
-    # 删除原来的headers和params部分
-    sed -i '/params: { address: this.config.wallet_address },/,/},/d' index.js
-    
-    # checkIn方法
-    sed -i '/const checkInResponse = await axios.post(/i \ \ \ \ const proxyConfig = this.proxy ? getProxyConfig(this.proxy, {\n      '"'"'Authorization'"'"': `Bearer ${this.config.bearer_token}`,\n      '"'"'Content-Type'"'"': '"'"'application\/json'"'"',\n      '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"'\n    }) : {\n      headers: {\n        '"'"'Authorization'"'"': `Bearer ${this.config.bearer_token}`,\n        '"'"'Content-Type'"'"': '"'"'application\/json'"'"',\n        '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"'\n      }\n    };' index.js
-    sed -i 's/const checkInResponse = await axios.post(/const checkInResponse = await axios.post(/g' index.js
-    sed -i 's/`${this.baseUrl}\/v1\/node\/check_in`, \n        { address: this.config.wallet_address },\n        {/`${this.baseUrl}\/v1\/node\/check_in`, { address: this.config.wallet_address }, proxyConfig);/g' index.js
-    # 删除原来的headers部分
-    sed -i '/headers: {/,/},/d' index.js
-    
-    # onboardNode方法
-    sed -i '/const response = await axios.post(`${this.baseUrl}\/v1\/node\/onboard`/i \ \ \ \ const proxyConfig = this.proxy ? getProxyConfig(this.proxy, {\n      '"'"'Authorization'"'"': `Bearer ${this.config.bearer_token}`,\n      '"'"'Content-Type'"'"': '"'"'application\/json'"'"',\n      '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"'\n    }) : {\n      headers: {\n        '"'"'Authorization'"'"': `Bearer ${this.config.bearer_token}`,\n        '"'"'Content-Type'"'"': '"'"'application\/json'"'"',\n        '"'"'Accept'"'"': '"'"'application\/json, text\/plain, *\/*'"'"'\n      }\n    };' index.js
-    sed -i 's/const response = await axios.post(`${this.baseUrl}\/v1\/node\/onboard`, /const response = await axios.post(`${this.baseUrl}\/v1\/node\/onboard`, /g' index.js
-    sed -i 's/{ address: this.config.wallet_address },\n        {/{ address: this.config.wallet_address }, proxyConfig);/g' index.js
-    # 删除原来的headers部分
-    sed -i '/headers: {/,/},/d' index.js
-    
-    # 5. 修改main函数以支持简单格式的config.json和proxy_config.json
-    # 找到main函数
-    sed -i '/async function main() {/,/main().catch/c\async function main() {\n  // 加载私钥配置（每行一个私钥）\n  let privateKeys = [];\n  try {\n    const configPath = path.resolve('"'"'./config.json'"'"');\n    if (fs.existsSync(configPath)) {\n      const configContent = fs.readFileSync(configPath, '"'"'utf8'"'"');\n      privateKeys = configContent.split('"'"'\\n'"'"').filter(line => line.trim() !== '"'"''"'"');\n      console.log(`Loaded ${privateKeys.length} accounts.`);\n    } else {\n      console.error('"'"'config.json file not found'"'"');\n      process.exit(1);\n    }\n  } catch (error) {\n    console.error('"'"'Error loading accounts config:'"'"', error);\n    process.exit(1);\n  }\n\n  if (privateKeys.length === 0) {\n    console.error('"'"'No accounts found in config.json'"'"');\n    process.exit(1);\n  }\n\n  // 转换为accounts格式\n  const accounts = privateKeys.map(privateKey => ({ privateKey }));\n\n  // 加载代理配置（每行一个代理）\n  let proxies = [];\n  try {\n    const proxyConfigPath = path.resolve('"'"'./proxy_config.json'"'"');\n    if (fs.existsSync(proxyConfigPath)) {\n      const proxyContent = fs.readFileSync(proxyConfigPath, '"'"'utf8'"'"');\n      proxies = proxyContent.split('"'"'\\n'"'"').filter((line, i) => i < privateKeys.length);\n      // 填充空代理以匹配账户数量\n      while (proxies.length < privateKeys.length) {\n        proxies.push('"'"''"'"');\n      }\n      console.log(`Loaded ${proxies.filter(p => p.trim() !== '"'"''"'"').length} proxies.`);\n    }\n  } catch (error) {\n    console.error('"'"'Error loading proxy config:'"'"', error);\n  }\n\n  // 创建一个共享的 blessed 屏幕\n  const screen = blessed.screen({\n    smartCSR: true,\n    title: '"'"'Multi-Account Parasail Bot'"'"'\n  });\n\n  // 记录账户数量，以便动态分配 UI 空间\n  screen.accountsCount = accounts.length;\n\n  // 为每个账户创建 ParasailNodeBot 实例\n  const bots = accounts.map((account, index) => {\n    const proxy = index < proxies.length ? proxies[index].trim() : null;\n    return new ParasailNodeBot(account, index, screen, proxy ? proxy : null);\n  });\n\n  // 添加退出键\n  screen.key(['"'"'q'"'"', '"'"'C-c'"'"'], () => {\n    return process.exit(0);\n  });\n\n  // 底部添加退出提示\n  const quitBox = blessed.box({\n    parent: screen,\n    bottom: 0,\n    left: 0,\n    width: '"'"'100%'"'"',\n    height: 1,\n    content: '"'"'Press Q to Quit'"'"',\n    style: {\n      fg: '"'"'white'"'"',\n      bg: '"'"'gray'"'"'\n    }\n  });\n\n  // 并发启动所有账户\n  await Promise.all(bots.map(bot => bot.start()));\n}\n\nmain().catch(error => {\n  console.error('"'"'Main error:'"'"', error);\n  process.exit(1);\n});' index.js
-    
-    print_info "代码修改完成，确保配置更可靠"
+    print_info "代码更新成功，已添加代理支持"
     cd ..
     
     print_info "代理功能配置完成"
@@ -525,40 +841,389 @@ fix_issues() {
     # 检查index.js语法错误
     print_info "检查index.js是否有语法错误..."
     if ! node --check index.js &>/dev/null; then
-        print_warn "检测到index.js语法错误，尝试修复..."
+        print_warn "检测到index.js语法错误，进行完全重置..."
         
-        # 从备份恢复
+        # 从备份恢复或创建新文件
         if [ -f "index.js.original" ]; then
             cp index.js.original index.js
             print_info "已从原始备份恢复index.js"
-        elif [ -f "index.js.backup_syntax" ]; then
-            cp index.js.backup_syntax index.js
-            print_info "已从语法备份恢复index.js"
         else
-            print_warn "无法找到index.js备份，将尝试修复语法错误"
+            print_warn "未找到原始备份，创建新的index.js文件"
             
-            # 修复常见语法错误 - 括号不匹配问题
-            sed -i 's/););/);/g' index.js
-            sed -i 's/});});/});/g' index.js
-            sed -i 's/}\s*});/});/g' index.js
-            sed -i 's/}\s*)\s*});/});/g' index.js
+            # 使用完整预构建的index.js文件替换现有文件
+            print_info "替换index.js文件，添加代理支持..."
             
-            # 检查修复是否成功
-            if ! node --check index.js &>/dev/null; then
-                print_error "语法修复失败，将重置index.js"
-                # 通过git clone临时获取原始文件
-                if [ ! -d "temp_repo" ]; then
-                    git clone https://github.com/parasail-protocol/parasail-bot.git temp_repo
-                fi
-                
-                if [ -d "temp_repo" ]; then
-                    cp temp_repo/index.js index.js
-                    print_info "已从仓库恢复原始index.js"
-                    rm -rf temp_repo
-                fi
-            else
-                print_info "语法修复成功"
-            fi
+            # 创建支持代理的index.js文件
+            cat > index.js << 'EOL'
+/* Parasail Bot with Proxy Support */
+const axios = require('axios');
+const { ethers } = require('ethers');
+const fs = require('fs');
+const path = require('path');
+const blessed = require('blessed');
+const { HttpsProxyAgent } = require('https-proxy-agent');
+const { SocksProxyAgent } = require('socks-proxy-agent');
+
+// 获取代理配置的辅助函数
+function getProxyConfig(proxy, headers = {}) {
+  const config = { headers };
+  
+  if (proxy) {
+    let proxyAgent;
+    if (proxy.startsWith('socks5:')) {
+      proxyAgent = new SocksProxyAgent(proxy);
+    } else {
+      proxyAgent = new HttpsProxyAgent(proxy);
+    }
+    config.httpsAgent = proxyAgent;
+    config.httpAgent = proxyAgent;
+  }
+  
+  return config;
+}
+
+class ParasailNodeBot {
+  constructor(account, index, screen, proxy = null) {
+    this.account = account;
+    this.index = index;
+    this.screen = screen;
+    this.proxy = proxy;
+    this.baseUrl = 'https://api.slicksurfer.xyz';
+    this.config = {};
+    this.nodeInfo = {};
+    
+    // UI 创建
+    const height = Math.floor((screen.height - 3) / screen.accountsCount);
+    this.log_box = blessed.log({
+      parent: screen,
+      top: index * height,
+      left: 0,
+      width: '100%',
+      height: height,
+      border: {
+        type: 'line'
+      },
+      style: {
+        fg: 'green',
+        border: {
+          fg: 'blue'
+        }
+      },
+      scrollable: true,
+      scrollbar: {
+        style: {
+          bg: 'white'
+        }
+      }
+    });
+  }
+  
+  log(message) {
+    const time = new Date().toLocaleTimeString();
+    this.log_box.log(`[${time}] [Account ${this.index + 1}] ${message}`);
+    this.screen.render();
+  }
+  
+  async generateSignature() {
+    // 创建钱包
+    const wallet = new ethers.Wallet(this.account.privateKey);
+    
+    // 获取钱包地址
+    const address = await wallet.getAddress();
+    this.config.wallet_address = address;
+    
+    // 签名消息
+    const message = 'You are starting the PARASAIL NODE for Brawler Bearz Labs.';
+    const signature = await wallet.signMessage(message);
+    
+    return {
+      message,
+      signature,
+      address
+    };
+  }
+  
+  async verifyUser() {
+    this.log('正在验证钱包...');
+    
+    try {
+      const signatureData = await this.generateSignature();
+      
+      const proxyConfig = this.proxy ? getProxyConfig(this.proxy, {
+        'Accept': 'application/json, text/plain, */*',
+        'Content-Type': 'application/json'
+      }) : {
+        headers: {
+          'Accept': 'application/json, text/plain, */*',
+          'Content-Type': 'application/json'
+        }
+      };
+      
+      if (this.proxy) {
+        this.log(`使用代理: ${this.proxy}`);
+      }
+      
+      const response = await axios.post(`${this.baseUrl}/user/verify`, signatureData, proxyConfig);
+      
+      if (response.data && response.data.bearer_token) {
+        this.config.bearer_token = response.data.bearer_token;
+        this.log('钱包验证成功');
+        return true;
+      } else {
+        this.log('钱包验证失败: 响应中没有token');
+        return false;
+      }
+    } catch (error) {
+      this.log(`钱包验证错误: ${error.message}`);
+      if (error.response) {
+        this.log(`状态码: ${error.response.status}`);
+      }
+      return false;
+    }
+  }
+  
+  async getNodeStats() {
+    this.log('查询节点状态...');
+    
+    try {
+      const proxyConfig = this.proxy ? getProxyConfig(this.proxy, {
+        'Authorization': `Bearer ${this.config.bearer_token}`,
+        'Accept': 'application/json, text/plain, */*'
+      }) : {
+        headers: {
+          'Authorization': `Bearer ${this.config.bearer_token}`,
+          'Accept': 'application/json, text/plain, */*'
+        }
+      };
+      
+      proxyConfig.params = { address: this.config.wallet_address };
+      
+      const response = await axios.get(`${this.baseUrl}/v1/node/node_stats`, proxyConfig);
+      
+      if (response.data) {
+        this.nodeInfo = response.data;
+        this.log(`节点状态: ${response.data.status || 'unknown'}`);
+        return response.data;
+      }
+      return null;
+    } catch (error) {
+      this.log(`获取节点状态错误: ${error.message}`);
+      return null;
+    }
+  }
+  
+  async checkIn() {
+    this.log('执行节点签到...');
+    
+    try {
+      const proxyConfig = this.proxy ? getProxyConfig(this.proxy, {
+        'Authorization': `Bearer ${this.config.bearer_token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/plain, */*'
+      }) : {
+        headers: {
+          'Authorization': `Bearer ${this.config.bearer_token}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json, text/plain, */*'
+        }
+      };
+      
+      const checkInResponse = await axios.post(`${this.baseUrl}/v1/node/check_in`, { address: this.config.wallet_address }, proxyConfig);
+      
+      if (checkInResponse.data) {
+        this.log(`签到成功: ${JSON.stringify(checkInResponse.data)}`);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      this.log(`签到错误: ${error.message}`);
+      return false;
+    }
+  }
+
+  async onboardNode() {
+    this.log('正在注册新节点...');
+    
+    try {
+      const proxyConfig = this.proxy ? getProxyConfig(this.proxy, {
+        'Authorization': `Bearer ${this.config.bearer_token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/plain, */*'
+      }) : {
+        headers: {
+          'Authorization': `Bearer ${this.config.bearer_token}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json, text/plain, */*'
+        }
+      };
+      
+      const response = await axios.post(`${this.baseUrl}/v1/node/onboard`, { address: this.config.wallet_address }, proxyConfig);
+      
+      if (response.data) {
+        this.log(`节点注册成功: ${JSON.stringify(response.data)}`);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      this.log(`节点注册错误: ${error.message}`);
+      if (error.response && error.response.data) {
+        this.log(`响应详情: ${JSON.stringify(error.response.data)}`);
+      }
+      return false;
+    }
+  }
+  
+  async start() {
+    this.log('初始化账户...');
+    
+    try {
+      // 验证用户
+      const userVerified = await this.verifyUser();
+      
+      if (!userVerified) {
+        this.log('用户验证失败，无法继续');
+        return;
+      }
+      
+      // 获取节点状态
+      const stats = await this.getNodeStats();
+      
+      if (stats && stats.status === 'active') {
+        this.log('节点已激活');
+        
+        // 开始定期签到
+        await this.checkIn();
+        
+        // 10分钟签到一次
+        setInterval(async () => {
+          await this.checkIn();
+        }, 10 * 60 * 1000);
+        
+      } else {
+        this.log('节点未激活，尝试注册');
+        const registered = await this.onboardNode();
+        
+        if (registered) {
+          this.log('节点已成功注册，等待激活');
+          
+          // 等待节点状态变为active
+          const checkStatus = async () => {
+            const stats = await this.getNodeStats();
+            
+            if (stats && stats.status === 'active') {
+              this.log('节点已激活，开始执行定期签到');
+              
+              // 执行首次签到
+              await this.checkIn();
+              
+              // 10分钟签到一次
+              setInterval(async () => {
+                await this.checkIn();
+              }, 10 * 60 * 1000);
+              
+              return;
+            }
+            
+            // 继续等待
+            this.log('等待节点激活...');
+            setTimeout(checkStatus, 30 * 1000);
+          };
+          
+          // 开始检查状态
+          setTimeout(checkStatus, 30 * 1000);
+        } else {
+          this.log('节点注册失败');
+        }
+      }
+    } catch (error) {
+      this.log(`启动过程中出错: ${error.message}`);
+    }
+  }
+}
+
+async function main() {
+  // 加载私钥配置（每行一个私钥）
+  let privateKeys = [];
+  try {
+    const configPath = path.resolve('./config.json');
+    if (fs.existsSync(configPath)) {
+      const configContent = fs.readFileSync(configPath, 'utf8');
+      privateKeys = configContent.split('\n').filter(line => line.trim() !== '');
+      console.log(`已加载 ${privateKeys.length} 个账户`);
+    } else {
+      console.error('config.json 文件不存在');
+      process.exit(1);
+    }
+  } catch (error) {
+    console.error('加载账户配置错误:', error);
+    process.exit(1);
+  }
+
+  if (privateKeys.length === 0) {
+    console.error('config.json 中没有找到任何账户');
+    process.exit(1);
+  }
+
+  // 转换为accounts格式
+  const accounts = privateKeys.map(privateKey => ({ privateKey }));
+
+  // 加载代理配置（每行一个代理）
+  let proxies = [];
+  try {
+    const proxyConfigPath = path.resolve('./proxy_config.json');
+    if (fs.existsSync(proxyConfigPath)) {
+      const proxyContent = fs.readFileSync(proxyConfigPath, 'utf8');
+      proxies = proxyContent.split('\n').filter(line => line.trim() !== '');
+      console.log(`已加载 ${proxies.length} 个代理`);
+    }
+  } catch (error) {
+    console.error('加载代理配置错误:', error);
+  }
+
+  // 创建一个共享的 blessed 屏幕
+  const screen = blessed.screen({
+    smartCSR: true,
+    title: 'Multi-Account Parasail Bot'
+  });
+
+  // 记录账户数量，以便动态分配 UI 空间
+  screen.accountsCount = accounts.length;
+
+  // 为每个账户创建 ParasailNodeBot 实例
+  const bots = accounts.map((account, index) => {
+    const proxy = index < proxies.length ? proxies[index] : null;
+    return new ParasailNodeBot(account, index, screen, proxy && proxy.trim() !== '' ? proxy : null);
+  });
+
+  // 添加退出键
+  screen.key(['q', 'C-c'], () => {
+    return process.exit(0);
+  });
+
+  // 底部添加退出提示
+  const quitBox = blessed.box({
+    parent: screen,
+    bottom: 0,
+    left: 0,
+    width: '100%',
+    height: 1,
+    content: '按 Q 退出',
+    style: {
+      fg: 'white',
+      bg: 'gray'
+    }
+  });
+
+  // 并发启动所有账户
+  await Promise.all(bots.map(bot => bot.start()));
+}
+
+main().catch(error => {
+  console.error('主程序错误:', error);
+  process.exit(1);
+});
+EOL
+            print_info "创建了新的index.js文件"
         fi
     else
         print_info "index.js语法检查通过"
@@ -570,76 +1235,33 @@ fix_issues() {
     npm install
     npm install https-proxy-agent socks-proxy-agent --save
     
-    # 4. 重新配置代理支持
-    print_info "重新配置代理支持..."
+    # 4. 修复配置文件
+    print_info "修复配置文件..."
     
-    # 如果有备份则恢复
-    if [ -f "index.js.original" ]; then
-        cp index.js.original index.js
-        print_info "已恢复原始index.js"
-    fi
-    
-    # 重新配置
-    print_info "正在重新应用代理配置..."
-    cd ..
-    configure_proxy
-    
-    # 5. 验证代理配置文件格式
-    cd Parasail-Bot
-    # 强制检查并修复proxy_config.json
-    if [ -f "proxy_config.json" ]; then
-        # 确保proxy_config.json格式正确，一行一个代理
-        if [ -s "proxy_config.json" ]; then
-            # 检查并清理格式
-            # 1. 删除可能的空白行和注释
-            sed -i '/^$/d' proxy_config.json
-            sed -i '/^#/d' proxy_config.json
-            # 2. 删除可能的JSON格式符号
-            sed -i 's/\[//g' proxy_config.json
-            sed -i 's/\]//g' proxy_config.json
-            sed -i 's/,//g' proxy_config.json
-            sed -i 's/"//g' proxy_config.json
-            sed -i 's/{//g' proxy_config.json
-            sed -i 's/}//g' proxy_config.json
-            # 3. 确保每行格式正确
-            sed -i 's/^[[:space:]]*//g' proxy_config.json
-            sed -i 's/[[:space:]]*$//g' proxy_config.json
-            
-            local proxy_count=$(grep -v "^$" proxy_config.json | wc -l)
-            print_info "修复后检测到 $proxy_count 个代理配置"
-        else
-            print_warn "proxy_config.json为空"
-        fi
-    else
-        print_warn "未找到proxy_config.json，创建空文件"
+    # 确保proxy_config.json存在
+    if [ ! -f "proxy_config.json" ]; then
         touch proxy_config.json
+        print_info "创建了空的proxy_config.json文件"
     fi
     
-    # 6. 验证config.json格式
+    # 检查并修复config.json格式
     if [ -f "config.json" ]; then
         if [ ! -s "config.json" ]; then
             print_warn "config.json为空，请重新设置账户"
             cd ..
             add_accounts_and_proxies
         else
-            print_info "config.json格式正确"
-            
-            # 清理config.json，确保每行一个私钥
-            # 1. 删除可能的空白行和注释
-            sed -i '/^$/d' config.json
-            sed -i '/^#/d' config.json
-            # 2. 删除可能的JSON格式符号
-            sed -i 's/\[//g' config.json
-            sed -i 's/\]//g' config.json
-            sed -i 's/,//g' config.json
-            sed -i 's/"//g' config.json
-            sed -i 's/{//g' config.json
-            sed -i 's/}//g' config.json
-            # 3. 确保每行格式正确
-            sed -i 's/^[[:space:]]*//g' config.json
-            sed -i 's/[[:space:]]*$//g' config.json
-            # 4. 确保私钥前缀为0x
-            sed -i 's/^[^0]/0x&/g' config.json
+            # 规范化config.json格式，确保每行一个私钥
+            print_info "规范化config.json格式..."
+            # 创建临时文件
+            cp config.json config.json.tmp
+            # 提取所有私钥
+            grep -o '0x[0-9a-fA-F]\{64\}' config.json.tmp > config.json.clean
+            # 如果没有0x前缀的，也提取出来
+            grep -o '[0-9a-fA-F]\{64\}' config.json.tmp | grep -v '^0x' | sed 's/^/0x/' >> config.json.clean
+            # 如果有重复的，去重
+            sort config.json.clean | uniq > config.json
+            rm config.json.tmp config.json.clean
             
             # 检查文件内容，每行应该是一个私钥
             local key_count=$(grep -v "^$" config.json | wc -l)
@@ -651,14 +1273,28 @@ fix_issues() {
         add_accounts_and_proxies
     fi
     
-    # 7. 修复文件权限
+    # 验证代理配置文件格式
+    if [ -f "proxy_config.json" ]; then
+        # 规范化proxy_config.json格式
+        print_info "规范化proxy_config.json格式..."
+        # 删除空白行、注释和JSON符号
+        sed -i '/^$/d; /^#/d; s/\[//g; s/\]//g; s/,//g; s/"//g; s/{//g; s/}//g' proxy_config.json
+        # 去除每行开头和结尾的空白
+        sed -i 's/^[[:space:]]*//g; s/[[:space:]]*$//g' proxy_config.json
+        
+        # 统计有效代理
+        local proxy_count=$(grep -v "^$" proxy_config.json | wc -l)
+        print_info "检测到 $proxy_count 个代理配置"
+    fi
+    
+    # 5. 修复文件权限
     print_info "修复文件权限..."
     chmod -R 755 .
     chmod 644 *.json
     
     cd ..
     
-    # 8. 重启服务
+    # 6. 重启服务
     print_info "正在重新加载系统服务..."
     systemctl daemon-reload
     
@@ -670,13 +1306,13 @@ fix_issues() {
         systemctl start parasail-bot
     fi
     
-    sleep 3
+    sleep 5
     
     if systemctl is-active --quiet parasail-bot; then
         print_info "服务已成功启动!"
     else
         print_error "服务启动失败，查看错误日志:"
-        journalctl -u parasail-bot -n 10 --no-pager
+        journalctl -u parasail-bot -n 15 --no-pager
         
         print_info "尝试进一步修复..."
         print_info "1. 完全重置代码和配置..."
@@ -709,13 +1345,8 @@ fix_issues() {
             
             # 确保proxy_config.json格式正确
             cd Parasail-Bot
-            # 删除可能的JSON格式符号
-            sed -i 's/\[//g' proxy_config.json
-            sed -i 's/\]//g' proxy_config.json
-            sed -i 's/,//g' proxy_config.json
-            sed -i 's/"//g' proxy_config.json
-            sed -i 's/{//g' proxy_config.json
-            sed -i 's/}//g' proxy_config.json
+            sed -i '/^$/d; /^#/d; s/\[//g; s/\]//g; s/,//g; s/"//g; s/{//g; s/}//g' proxy_config.json
+            sed -i 's/^[[:space:]]*//g; s/[[:space:]]*$//g' proxy_config.json
             cd ..
         fi
         
@@ -723,13 +1354,13 @@ fix_issues() {
         systemctl daemon-reload
         systemctl restart parasail-bot
         
-        sleep 3
+        sleep 5
         
         if systemctl is-active --quiet parasail-bot; then
             print_info "服务已成功启动!"
         else
             print_error "服务启动仍然失败，请尝试重新安装或手动检查配置"
-            journalctl -u parasail-bot -n 10 --no-pager
+            journalctl -u parasail-bot -n 15 --no-pager
         fi
     fi
     
