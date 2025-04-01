@@ -41,6 +41,107 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# 预安装检查和自动修复常见问题
+preinstall_checks() {
+    print_info "执行预安装检查和自动修复..."
+    
+    # 1. 检查操作系统和软件包管理器
+    if command -v apt &> /dev/null; then
+        print_info "检测到Debian/Ubuntu系统，继续安装..."
+        
+        # 更新软件包列表
+        apt update -y
+        
+        # 1.1 检查curl是否安装
+        if ! command -v curl &> /dev/null; then
+            print_warn "curl未安装，正在安装..."
+            apt install -y curl
+        fi
+        
+        # 1.2 检查git是否安装
+        if ! command -v git &> /dev/null; then
+            print_warn "git未安装，正在安装..."
+            apt install -y git
+        fi
+        
+        # 1.3 检查Node.js
+        if ! command -v node &> /dev/null; then
+            print_warn "Node.js未安装，正在安装..."
+            curl -fsSL https://deb.nodesource.com/setup_16.x | bash -
+            apt install -y nodejs
+        else
+            NODE_VERSION=$(node -v | cut -d 'v' -f 2 | cut -d '.' -f 1)
+            if [ "$NODE_VERSION" -lt 14 ] || [ "$NODE_VERSION" -gt 18 ]; then
+                print_warn "Node.js版本不兼容（${NODE_VERSION}），建议使用v14-v16版本，正在安装v16..."
+                curl -fsSL https://deb.nodesource.com/setup_16.x | bash -
+                apt install -y nodejs
+            fi
+        fi
+        
+        # 1.4 检查npm
+        if ! command -v npm &> /dev/null; then
+            print_warn "npm未安装，正在安装..."
+            apt install -y npm
+        fi
+    else
+        print_warn "未检测到apt包管理器，可能不是Debian/Ubuntu系统，将尝试继续但可能会有兼容性问题..."
+    fi
+    
+    # 2. 创建必要目录
+    if [ ! -d "Parasail-Bot" ]; then
+        print_info "创建Parasail-Bot目录..."
+        mkdir -p Parasail-Bot
+    fi
+    
+    # 3. 预先安装代理相关依赖包
+    if [ -d "Parasail-Bot" ]; then
+        cd Parasail-Bot
+        
+        # 创建package.json（如果不存在）
+        if [ ! -f "package.json" ]; then
+            print_info "创建package.json..."
+            cat > package.json << EOL
+{
+  "name": "parasail-bot",
+  "version": "1.0.0",
+  "description": "Parasail Node Bot",
+  "main": "index.js",
+  "dependencies": {
+    "axios": "^0.27.2",
+    "blessed": "^0.1.81",
+    "ethers": "^5.6.8",
+    "https-proxy-agent": "^5.0.1",
+    "socks-proxy-agent": "^7.0.0"
+  },
+  "scripts": {
+    "start": "node index.js"
+  }
+}
+EOL
+        fi
+        
+        # 安装代理所需依赖
+        print_info "预安装代理所需依赖..."
+        npm install https-proxy-agent socks-proxy-agent --save
+        
+        cd ..
+    fi
+    
+    # 4. 检查系统服务配置
+    if [ -f "/etc/systemd/system/parasail-bot.service" ]; then
+        # 检查是否包含过时的syslog配置
+        if grep -q "StandardOutput=syslog" "/etc/systemd/system/parasail-bot.service"; then
+            print_warn "检测到系统服务使用过时的syslog配置，正在更新..."
+            # 更新服务文件
+            sed -i 's/StandardOutput=syslog//' "/etc/systemd/system/parasail-bot.service"
+            sed -i 's/StandardError=syslog//' "/etc/systemd/system/parasail-bot.service"
+            systemctl daemon-reload
+        fi
+    fi
+    
+    print_info "预安装检查和自动修复完成"
+}
+
 # 检查是否有root权限
 check_root() {
     if [ "$EUID" -ne 0 ]; then
@@ -68,8 +169,9 @@ install_dependencies() {
     # 检查Node.js版本，如果低于14则更新
     if command -v node &> /dev/null; then
         NODE_VERSION=$(node -v | cut -d 'v' -f 2 | cut -d '.' -f 1)
-        if [ "$NODE_VERSION" -lt 14 ]; then
-            print_warn "Node.js版本低于14，正在更新..."
+        # 修改Node.js版本检查逻辑：如果版本过高也进行降级
+        if [ "$NODE_VERSION" -lt 14 ] || [ "$NODE_VERSION" -gt 18 ]; then
+            print_warn "Node.js版本不兼容（${NODE_VERSION}），建议使用v14-v16版本，正在安装v16..."
             curl -fsSL https://deb.nodesource.com/setup_16.x | bash -
             apt install -y nodejs
         fi
@@ -294,8 +396,6 @@ WorkingDirectory=$(pwd)/Parasail-Bot
 ExecStart=/usr/bin/node index.js
 Restart=on-failure
 RestartSec=10
-StandardOutput=syslog
-StandardError=syslog
 SyslogIdentifier=parasail-bot
 
 [Install]
@@ -717,6 +817,8 @@ main() {
     case $option in
         1)
             check_root
+            # 执行预安装检查
+            preinstall_checks
             install_jq
             install_dependencies
             clone_repository
@@ -746,6 +848,8 @@ main() {
                 print_error "未检测到机器人安装，请先安装"
                 exit 1
             fi
+            # 在启动前执行预安装检查，确保环境正常
+            preinstall_checks
             start_bot
             ;;
         4)
@@ -768,6 +872,8 @@ main() {
             ;;
         8)
             check_root
+            # 在修复前执行预安装检查
+            preinstall_checks
             fix_issues
             ;;
         0)
